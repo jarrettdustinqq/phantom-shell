@@ -1,0 +1,145 @@
+name: Codex Safe Lane (command)
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  run:
+    if: >
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/safe-lane')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Hard allowlist (edit to your username)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const actor = context.actor;
+            if (actor !== "jarrettdustinqq") {
+              core.setFailed(`Not allowed. Only jarrettdustinqq can run /safe-lane. Actor=${actor}`);
+            }
+
+      - name: Fetch PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.issue.number;
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            core.setOutput("base_ref", pr.base.ref);
+
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.base_ref }}
+
+      - name: Create codex branch
+        id: vars
+        run: |
+          BRANCH="codex/$(date +%Y%m%d-%H%M)-safe-lane"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          git switch -c "$BRANCH"
+
+      - name: Run Codex (generate Safe Lane files)
+        id: run_codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          # Privilege reduction (recommended default)
+          safety-strategy: drop-sudo
+          # Allow edits in workspace; choose narrowest that works
+          sandbox: workspace-write
+          prompt: |
+            Create (or update) these files EXACTLY as specified.
+            Do NOT modify `.github/workflows/codex-safe-lane-command.yml`.
+            Only use the repository contents and your own reasoning.
+
+            1) `.githooks/pre-commit` (executable):
+               - Scan staged added lines only.
+               - Block secrets: OpenAI keys (sk-...), GitHub tokens (gh*_ / github_pat_), AWS access key ids (AKIA/ASIA...), private key blocks.
+               - Block destructive ops: rm -rf, mkfs, dd, curl|wget | sh/bash, sudo + destructive ops, chmod 777, iptables -F.
+
+            2) `.github/CODEOWNERS`:
+               - Set owner @jarrettdustinqq for sensitive paths:
+                 `.github/workflows/`, `.github/`, `scripts/`, `.githooks/`, `infra/`, `terraform/`, `docker/`, `k8s/`,
+                 `.env*`, `*.pem`, `*.key`, `*.p12`, anything containing 'keystore',
+                 lockfiles and requirements/poetry locks.
+
+            3) `.github/pull_request_template.md`:
+               - Include "## Rollback plan (required)" section.
+
+            4) `.codex/SAFE_LANE.md`:
+               - Codex only operates on codex/* branches.
+               - codex/* PRs require rollback plan.
+               - Sensitive touches require SAFE_LANE_OVERRIDE: YES + justification.
+               - Rollback: pre-merge tag, post-merge git revert.
+
+            5) `scripts/enable-hooks.sh` (executable):
+               - Runs: `git config core.hooksPath .githooks`
+               - Prints confirmation.
+
+            Keep changes minimal and auditable.
+          output-file: codex-safe-lane-output.md
+
+      - name: Commit changes
+        run: |
+          git config user.name "codex-bot"
+          git config user.email "codex-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: install Safe Lane (hooks, CODEOWNERS, PR template, docs)"
+
+      - name: Push branch
+        run: |
+          git push -u origin "${{ steps.vars.outputs.branch }}"
+
+      - name: Open PR
+        id: open_pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = "${{ steps.vars.outputs.branch }}";
+            const base = "${{ steps.pr.outputs.base_ref }}";
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: "chore: install Safe Lane",
+              head: branch,
+              base,
+              body: [
+                "## Intent",
+                "Install Safe Lane guardrails (hooks/CODEOWNERS/PR template/docs).",
+                "",
+                "SAFE_LANE_OVERRIDE: YES",
+                "Justification: Safe Lane install necessarily touches sensitive paths (.github/, hooks).",
+                "",
+                "## Rollback plan",
+                "- Revert method: git revert the merge commit for this PR."
+              ].join("\\n")
+            });
+            core.setOutput("url", pr.html_url);
+
+      - name: Reply to trigger comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: `✅ Safe Lane PR created: ${{ steps.open_pr.outputs.url }}`
+            });
