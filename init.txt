@@ -1,1 +1,2 @@
 Phantom Shell initialized.
+Run scripts/install_codex.sh to cleanly install the Codex CLI.
