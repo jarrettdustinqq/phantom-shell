@@ -1,0 +1,167 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "phantom-shell/ai-ecosystem",
+        "options": {
+          "responseContentType": "application/json"
+        }
+      },
+      "id": "1",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -520,
+        200
+      ],
+      "webhookId": "phantom-shell-ai-ecosystem"
+    },
+    {
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "responseFormat": "json",
+        "systemMessage": "You are a planner that converts a natural language task into a structured tool request for a Python agent. Always return a JSON object with keys instruction, context, and tool_specs.",
+        "messages": {
+          "chatMessages": [
+            {
+              "text": "User task: {{$json.task}}\nOptional context: {{$json.context}}\nReturn JSON with instruction, context, tool_specs (tools you recommend the Python agent should run).",
+              "type": "user"
+            }
+          ]
+        }
+      },
+      "id": "2",
+      "name": "Intent Planner",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 2,
+      "position": [
+        -280,
+        200
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "{{OPENAI_CREDENTIAL_ID}}",
+          "name": "OpenAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://host.docker.internal:5000/agent",
+        "jsonParameters": true,
+        "options": {
+          "timeout": 120
+        },
+        "body": "={{$json}}"
+      },
+      "id": "3",
+      "name": "Python Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -40,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "systemMessage": "You summarise the Python agent result for an end user and list recommended follow-up actions.",
+        "messages": {
+          "chatMessages": [
+            {
+              "text": "Task: {{$json.body.instruction}}\n\nContext: {{$json.body.context}}\n\nTool outputs: {{$json.body.raw_tool_outputs}}\n\nReasoning: {{$json.body.result}}\n\nProvide a concise summary and next steps.",
+              "type": "user"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4",
+      "name": "Result Summariser",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 2,
+      "position": [
+        200,
+        200
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "{{OPENAI_CREDENTIAL_ID}}",
+          "name": "OpenAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "lastNode",
+        "options": {
+          "responseContentType": "application/json"
+        }
+      },
+      "id": "5",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        440,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Intent Planner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intent Planner": {
+      "main": [
+        [
+          {
+            "node": "Python Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python Agent": {
+      "main": [
+        [
+          {
+            "node": "Result Summariser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Result Summariser": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "phantom-shell-ai-ecosystem-v1",
+  "id": "phantom-shell-ai-ecosystem"
+}
