@@ -1,0 +1,201 @@
+name: export-pr-evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to export evidence for
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  export:
+    name: export-evidence
+    runs-on: ubuntu-latest
+    env:
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Export evidence tuple
+        id: export
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_EVIDENCE_OUTPUT_DIR: ${{ github.workspace }}/pr-evidence
+        run: |
+          set -euo pipefail
+
+          raw_pr_number="${{ inputs.pr_number }}"
+          pr_number="${raw_pr_number#\#}"
+          if ! [[ "${pr_number}" =~ ^[0-9]+$ ]]; then
+            echo "::error::workflow_dispatch input 'pr_number' must be a positive integer (got '${raw_pr_number}')"
+            exit 1
+          fi
+
+          output_log="$(mktemp)"
+          if ! scripts/export_pr_evidence_tuple.sh "${pr_number}" | tee "${output_log}"; then
+            echo "::error::export_pr_evidence_tuple.sh failed for PR #${pr_number}"
+            exit 1
+          fi
+
+          json_path="$(grep -E '^json=' "${output_log}" | tail -n1 | cut -d= -f2-)"
+          md_path="$(grep -E '^md=' "${output_log}" | tail -n1 | cut -d= -f2-)"
+          sha_path="$(grep -E '^sha256=' "${output_log}" | tail -n1 | cut -d= -f2-)"
+
+          if [ -z "${json_path}" ] || [ -z "${md_path}" ] || [ -z "${sha_path}" ]; then
+            echo "::error::Exporter output did not include json/md/sha256 paths."
+            exit 1
+          fi
+
+          for path in "${json_path}" "${md_path}" "${sha_path}"; do
+            if [ ! -f "${path}" ]; then
+              echo "::error::Expected artifact file missing: ${path}"
+              exit 1
+            fi
+          done
+
+          tuple_lines="$(python3 - "${json_path}" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], "r", encoding="utf-8") as fh:
+              data = json.load(fh)
+
+          evidence = data.get("evidence", {})
+          pr = data.get("pr", {})
+          values = {
+              "verify_ts": evidence.get("verify_timestamp") or "missing",
+              "revoke_ts": evidence.get("revoke_timestamp") or "missing",
+              "stale_run_url": evidence.get("stale_failing_run_url") or "",
+              "passing_run_url": evidence.get("passing_run_url") or "",
+              "pr_url": pr.get("url") or "",
+          }
+          for key, value in values.items():
+              print(f"{key}={value}")
+          PY
+          )"
+
+          verify_ts="missing"
+          revoke_ts="missing"
+          stale_run_url=""
+          passing_run_url=""
+          pr_url=""
+          while IFS="=" read -r key value; do
+            case "${key}" in
+              verify_ts) verify_ts="${value}" ;;
+              revoke_ts) revoke_ts="${value}" ;;
+              stale_run_url) stale_run_url="${value}" ;;
+              passing_run_url) passing_run_url="${value}" ;;
+              pr_url) pr_url="${value}" ;;
+            esac
+          done <<< "${tuple_lines}"
+
+          artifact_name="pr-${pr_number}-evidence-tuple"
+          {
+            echo "pr_number=${pr_number}"
+            echo "json_path=${json_path}"
+            echo "md_path=${md_path}"
+            echo "sha_path=${sha_path}"
+            echo "json_file=$(basename "${json_path}")"
+            echo "md_file=$(basename "${md_path}")"
+            echo "sha_file=$(basename "${sha_path}")"
+            echo "artifact_name=${artifact_name}"
+            echo "verify_ts=${verify_ts}"
+            echo "revoke_ts=${revoke_ts}"
+            echo "stale_run_url=${stale_run_url}"
+            echo "passing_run_url=${passing_run_url}"
+            echo "pr_url=${pr_url}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Upload evidence artifact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.export.outputs.artifact_name }}
+          if-no-files-found: error
+          path: |
+            ${{ steps.export.outputs.json_path }}
+            ${{ steps.export.outputs.md_path }}
+            ${{ steps.export.outputs.sha_path }}
+
+      - name: Upsert PR evidence comment
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.export.outputs.pr_number }}
+          RUN_URL: ${{ env.RUN_URL }}
+          ARTIFACT_NAME: ${{ steps.export.outputs.artifact_name }}
+          JSON_FILE: ${{ steps.export.outputs.json_file }}
+          MD_FILE: ${{ steps.export.outputs.md_file }}
+          SHA_FILE: ${{ steps.export.outputs.sha_file }}
+          VERIFY_TS: ${{ steps.export.outputs.verify_ts }}
+          REVOKE_TS: ${{ steps.export.outputs.revoke_ts }}
+          STALE_RUN_URL: ${{ steps.export.outputs.stale_run_url }}
+          PASSING_RUN_URL: ${{ steps.export.outputs.passing_run_url }}
+          PR_URL: ${{ steps.export.outputs.pr_url }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const marker = "<!-- pr-evidence-tuple-export -->";
+            const issue_number = Number(process.env.PR_NUMBER);
+            if (!Number.isInteger(issue_number) || issue_number <= 0) {
+              core.setFailed(`Invalid PR number: ${process.env.PR_NUMBER}`);
+              return;
+            }
+
+            const prLine = process.env.PR_URL
+              ? `- PR: #${issue_number} (${process.env.PR_URL})`
+              : `- PR: #${issue_number}`;
+            const staleLine = process.env.STALE_RUN_URL
+              ? `- Stale failing run: ${process.env.STALE_RUN_URL}`
+              : "- Stale failing run: missing";
+            const passingLine = process.env.PASSING_RUN_URL
+              ? `- Passing run: ${process.env.PASSING_RUN_URL}`
+              : "- Passing run: missing";
+
+            const body = [
+              marker,
+              "### PR Evidence Tuple Export",
+              prLine,
+              `- Verify timestamp: \`${process.env.VERIFY_TS || "missing"}\``,
+              `- Revoke timestamp: \`${process.env.REVOKE_TS || "missing"}\``,
+              staleLine,
+              passingLine,
+              `- Run: [${process.env.RUN_URL}](${process.env.RUN_URL})`,
+              `- Artifact bundle: \`${process.env.ARTIFACT_NAME}\` (attached to the run above)`,
+              "- Files:",
+              `  - \`${process.env.JSON_FILE}\``,
+              `  - \`${process.env.MD_FILE}\``,
+              `  - \`${process.env.SHA_FILE}\``,
+            ].join("\n");
+
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 }
+            );
+
+            const existing = comments.find(
+              (comment) => comment.user?.type === "Bot" && comment.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.info(`Updated existing evidence comment: ${existing.id}`);
+            } else {
+              const created = await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body,
+              });
+              core.info(`Created evidence comment: ${created.data.id}`);
+            }
