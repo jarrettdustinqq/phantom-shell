@@ -1,0 +1,1 @@
+"""Phantom-shell automation package."""
