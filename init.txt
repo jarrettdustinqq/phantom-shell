@@ -1,1 +1,3 @@
 Phantom Shell initialized.
+
+Test note: evidence-gate e2e PR marker.
