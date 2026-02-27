@@ -45,6 +45,26 @@ Useful API routes:
 - `POST /api/agents/route`
 - `POST /api/agents/workflow`
 
+## DominionOS Control Plane
+
+```bash
+scripts/run_dominion_control.sh status
+scripts/run_dominion_control.sh cycle --objective "Improve risk-managed growth and backup resilience"
+scripts/run_dominion_swarm.sh
+scripts/continuity_publish_guard.py --base-ref origin/main
+```
+
+What it provides:
+
+- Mission-anchor enforcement with continuity mode tagging.
+- Structured handoff schema validation.
+- Message-bus event logging for Dominion agent orchestration.
+- Safety gates for irreversible actions and trade/post circuit breakers.
+- Project Ark backups with restore tests and Phoenix-style restore scaffold.
+- Immutable-section publish guardrails and dual-LLM verification scaffold.
+
+Read: `docs/dominion-protocol.md`
+
 ## Autonomous Risk Triage
 
 New module that scans `logs/universal_agent_audit.log`, connector health, and mission tasks, scoring the top risks and suggesting mitigations.

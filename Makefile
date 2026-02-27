@@ -1,4 +1,4 @@
-.PHONY: verify test verify-revoke-smoke export-evidence-tuple
+.PHONY: verify test verify-revoke-smoke export-evidence-tuple dominion-smoke publish-guard
 
 PY ?= python3
 
@@ -13,3 +13,12 @@ verify-revoke-smoke:
 
 export-evidence-tuple:
 	@./scripts/export_pr_evidence_tuple.sh $(PR)
+
+dominion-smoke:
+	@./scripts/run_dominion_control.sh status >/dev/null
+	@./scripts/run_dominion_control.sh cycle --objective "Smoke test dominion cycle" >/dev/null
+	@./scripts/run_dominion_swarm.sh >/dev/null
+	@echo "PASS: dominion smoke complete"
+
+publish-guard:
+	@./scripts/continuity_publish_guard.py --base-ref origin/main

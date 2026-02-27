@@ -1,0 +1,57 @@
+name: continuity-publish-guard
+
+on:
+  pull_request:
+    paths:
+      - "**/*.md"
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Base ref for diff checks
+        required: false
+        default: origin/main
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve base ref
+        id: base
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "value=origin/${{ github.base_ref }}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "value=${{ inputs.base_ref }}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Fetch base ref
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ steps.base.outputs.value#origin/ }}" --depth=1 || true
+
+      - name: Run continuity publish guard
+        run: |
+          set -euo pipefail
+          scripts/continuity_publish_guard.py --base-ref "${{ steps.base.outputs.value }}"
+
+      - name: Upload guard report
+        uses: actions/upload-artifact@v4
+        with:
+          name: continuity-publish-guard-report
+          if-no-files-found: ignore
+          path: reports/continuity-publish-guard.json

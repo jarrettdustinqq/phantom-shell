@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .loop-agent/
+.venv/
+reports/continuity-publish-guard.json
+logs/universal_agent_dashboard_healthcheck.log
