@@ -149,6 +149,10 @@ jobs:
           fi
 
           actual_sha="$(sha256sum "${json_path}" | awk '{ print $1 }')"
+          if [ -z "${actual_sha}" ]; then
+            echo "::error::Failed to recompute SHA256 for ${json_path}"
+            exit 1
+          fi
           if [ "${actual_sha}" != "${expected_sha}" ]; then
             echo "::error::Integrity mismatch for $(basename "${json_path}"): expected ${expected_sha}, got ${actual_sha}"
             exit 1
@@ -158,6 +162,8 @@ jobs:
           signed_by="export-pr-evidence/${GITHUB_RUN_ID}@${GITHUB_SHA}"
           {
             echo "integrity=PASS"
+            echo "expected_sha=${expected_sha}"
+            echo "actual_sha=${actual_sha}"
             echo "signed_by=${signed_by}"
             echo "checked_at=${checked_at}"
           } >> "${GITHUB_OUTPUT}"
@@ -165,6 +171,8 @@ jobs:
           {
             echo "### Artifact Integrity Verdict"
             echo "- Integrity: PASS"
+            echo "- Expected SHA: \`${expected_sha}\`"
+            echo "- Recomputed SHA: \`${actual_sha}\`"
             echo "- Signed-by: ${signed_by}"
             echo "- Checked-at: ${checked_at}"
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -184,6 +192,8 @@ jobs:
           PASSING_RUN_URL: ${{ steps.export.outputs.passing_run_url }}
           PR_URL: ${{ steps.export.outputs.pr_url }}
           INTEGRITY_VERDICT: ${{ steps.integrity.outputs.integrity }}
+          EXPECTED_SHA: ${{ steps.integrity.outputs.expected_sha }}
+          ACTUAL_SHA: ${{ steps.integrity.outputs.actual_sha }}
           SIGNED_BY: ${{ steps.integrity.outputs.signed_by }}
           CHECKED_AT: ${{ steps.integrity.outputs.checked_at }}
         with:
@@ -191,8 +201,14 @@ jobs:
           script: |
             const marker = "<!-- pr-evidence-tuple-export -->";
             const issue_number = Number(process.env.PR_NUMBER);
+            const expectedSha = (process.env.EXPECTED_SHA || "").trim();
+            const actualSha = (process.env.ACTUAL_SHA || "").trim();
             if (!Number.isInteger(issue_number) || issue_number <= 0) {
               core.setFailed(`Invalid PR number: ${process.env.PR_NUMBER}`);
+              return;
+            }
+            if (!expectedSha || !actualSha) {
+              core.setFailed("Missing expected/recomputed SHA values before posting evidence comment.");
               return;
             }
 
@@ -205,6 +221,8 @@ jobs:
             const passingLine = process.env.PASSING_RUN_URL
               ? `- Passing run: ${process.env.PASSING_RUN_URL}`
               : "- Passing run: missing";
+            const expectedShaLine = `- Expected SHA: \`${expectedSha}\``;
+            const actualShaLine = `- Recomputed SHA: \`${actualSha}\``;
 
             const body = [
               marker,
@@ -217,6 +235,8 @@ jobs:
               `- Run: [${process.env.RUN_URL}](${process.env.RUN_URL})`,
               `- Artifact bundle: \`${process.env.ARTIFACT_NAME}\` (attached to the run above)`,
               `- Integrity: ${process.env.INTEGRITY_VERDICT || "UNKNOWN"}`,
+              expectedShaLine,
+              actualShaLine,
               `- Signed-by: \`${process.env.SIGNED_BY || "missing"}\``,
               `- Checked-at: \`${process.env.CHECKED_AT || "missing"}\``,
               "- Files:",
@@ -235,13 +255,15 @@ jobs:
               (comment) => comment.user?.type === "Bot" && comment.body?.includes(marker)
             );
 
+            let postedBody = "";
             if (existing) {
-              await github.rest.issues.updateComment({
+              const updated = await github.rest.issues.updateComment({
                 owner,
                 repo,
                 comment_id: existing.id,
                 body,
               });
+              postedBody = updated.data?.body || "";
               core.info(`Updated existing evidence comment: ${existing.id}`);
             } else {
               const created = await github.rest.issues.createComment({
@@ -250,5 +272,12 @@ jobs:
                 issue_number,
                 body,
               });
+              postedBody = created.data?.body || "";
               core.info(`Created evidence comment: ${created.data.id}`);
             }
+
+            if (!postedBody.includes(expectedShaLine) || !postedBody.includes(actualShaLine)) {
+              core.setFailed("Posted marker comment is missing Expected SHA and Recomputed SHA lines.");
+              return;
+            }
+            core.info("Validated marker comment SHA evidence lines.");
