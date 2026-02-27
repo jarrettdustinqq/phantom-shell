@@ -45,7 +45,10 @@ State paths:
 - Trade guardrails block drawdown >5% and require pre-approval above 2.5% position size.
 - Circuit breakers for trade/post frequency are enforced.
 - Project Ark snapshots with retention pruning and restore tests are implemented.
+- Off-site snapshot sync hook is supported via command templates
+  (use `{snapshot_path}` placeholder in the command).
 - Phoenix redeploy scaffolding restores snapshot content to a fresh destination.
+- Snapshot restore enforces safe archive extraction and blocks traversal/link payloads.
 
 5. Dual-LLM verification:
 - Primary/secondary verification interface is implemented with explicit failover path.

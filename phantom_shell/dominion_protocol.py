@@ -12,7 +12,7 @@ This module implements high-leverage scaffolding for:
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,8 +21,11 @@ import difflib
 import json
 import math
 import re
+import shlex
+import subprocess
 import tarfile
 import tempfile
+import uuid
 
 
 MISSION_PILLARS = [
@@ -193,6 +196,7 @@ class SnapshotInfo:
     included_paths: list[str]
     restore_test_passed: bool
     offsite_sync_attempted: bool
+    offsite_sync_succeeded: bool
 
 
 @dataclass
@@ -279,7 +283,7 @@ class DominionMessageBus:
 
     def emit(self, event_type: str, source: str, payload: dict[str, Any]) -> dict[str, Any]:
         event = {
-            "event_id": f"evt-{int(datetime.now(timezone.utc).timestamp() * 1000)}",
+            "event_id": f"evt-{uuid.uuid4().hex}",
             "event_type": event_type,
             "source": source,
             "payload": payload,
@@ -293,14 +297,17 @@ class DominionMessageBus:
     def tail(self, limit: int = 100) -> list[dict[str, Any]]:
         if not self.event_log_path.exists():
             return []
-        lines = self.event_log_path.read_text(encoding="utf-8").splitlines()
-        out: list[dict[str, Any]] = []
-        for line in lines[-max(1, limit) :]:
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return out
+        out: deque[dict[str, Any]] = deque(maxlen=max(1, limit))
+        with self.event_log_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return list(out)
 
 
 class DominionPolicyEngine:
@@ -657,6 +664,38 @@ class ProjectArkManager:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         return f"project-ark-{stamp}.tar.gz"
 
+    def _run_offsite_sync(self, command_template: str, snapshot_path: Path) -> bool:
+        command = command_template.replace("{snapshot_path}", str(snapshot_path))
+        argv = shlex.split(command)
+        if not argv:
+            return False
+        proc = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        return proc.returncode == 0
+
+    @staticmethod
+    def _safe_members(tar: tarfile.TarFile, destination: Path) -> list[tarfile.TarInfo]:
+        root = destination.resolve()
+        safe: list[tarfile.TarInfo] = []
+        for member in tar.getmembers():
+            name = member.name
+            if name.startswith("/") or ".." in Path(name).parts:
+                raise ValueError(f"unsafe archive member path: {name}")
+            if member.issym() or member.islnk():
+                raise ValueError(f"unsafe archive link member: {name}")
+            target = (root / name).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise ValueError(f"path traversal detected in archive member: {name}") from exc
+            safe.append(member)
+        return safe
+
     def create_snapshot(
         self,
         include_paths: Iterable[Path],
@@ -674,9 +713,13 @@ class ProjectArkManager:
 
         restore_ok = self.restore_test(snapshot_path)
         offsite_attempted = False
+        offsite_succeeded = False
         if offsite_copy_command.strip():
-            # Hook only; execution intentionally omitted from core library.
             offsite_attempted = True
+            offsite_succeeded = self._run_offsite_sync(
+                command_template=offsite_copy_command,
+                snapshot_path=snapshot_path,
+            )
         self.prune(retention_days=retention_days)
         return SnapshotInfo(
             snapshot_path=str(snapshot_path),
@@ -685,6 +728,7 @@ class ProjectArkManager:
             included_paths=[str(item) for item in include],
             restore_test_passed=restore_ok,
             offsite_sync_attempted=offsite_attempted,
+            offsite_sync_succeeded=offsite_succeeded,
         )
 
     def list_snapshots(self) -> list[Path]:
@@ -711,8 +755,9 @@ class ProjectArkManager:
             target.mkdir(parents=True, exist_ok=True)
             try:
                 with tarfile.open(snapshot_path, "r:gz") as tar:
-                    tar.extractall(path=target)
-            except (tarfile.TarError, OSError):
+                    members = self._safe_members(tar, target)
+                    tar.extractall(path=target, members=members)
+            except (tarfile.TarError, OSError, ValueError):
                 return False
             return any(target.iterdir())
 
@@ -721,7 +766,8 @@ class ProjectArkManager:
             raise FileNotFoundError(f"snapshot not found: {snapshot_path}")
         destination.mkdir(parents=True, exist_ok=True)
         with tarfile.open(snapshot_path, "r:gz") as tar:
-            tar.extractall(path=destination)
+            members = self._safe_members(tar, destination)
+            tar.extractall(path=destination, members=members)
         return {
             "event": "recovery_event",
             "snapshot": str(snapshot_path),

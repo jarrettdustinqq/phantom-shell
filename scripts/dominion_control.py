@@ -201,7 +201,7 @@ def main() -> int:
 
     if args.command == "decide-action":
         decision = dom.policy.decide_action(
-            action_type=args.type if args.type != "other" else "publish",
+            action_type=args.type,
             irreversible=parse_bool(args.irreversible),
             preapproved=parse_bool(args.preapproved),
             trade_position_pct=args.trade_position_pct,

@@ -1,8 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+import tarfile
 
 from phantom_shell.dominion_protocol import (
+    DominionMessageBus,
     DominionOrchestrator,
     DominionPolicyEngine,
     HandoffValidator,
@@ -105,6 +107,35 @@ class DominionProtocolTests(unittest.TestCase):
                 destination=root / "restore",
             )
             self.assertEqual(restored["event"], "recovery_event")
+            self.assertIn(info.offsite_sync_succeeded, {True, False})
+
+    def test_project_ark_blocks_path_traversal_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bad_tar = root / "bad.tar.gz"
+            with tarfile.open(bad_tar, "w:gz") as tar:
+                payload = root / "payload.txt"
+                payload.write_text("x\n", encoding="utf-8")
+                tar.add(payload, arcname="../escape.txt")
+            ark = ProjectArkManager(root / "snapshots")
+            self.assertFalse(ark.restore_test(bad_tar))
+            with self.assertRaises(ValueError):
+                ark.phoenix_redeploy(bad_tar, root / "restore")
+
+    def test_project_ark_offsite_hook_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+            (src / "a.txt").write_text("hello\n", encoding="utf-8")
+            ark = ProjectArkManager(root / "snapshots")
+            info = ark.create_snapshot(
+                include_paths=[src],
+                retention_days=7,
+                offsite_copy_command="true",
+            )
+            self.assertTrue(info.offsite_sync_attempted)
+            self.assertTrue(info.offsite_sync_succeeded)
 
     def test_orchestrator_cycle_and_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,6 +173,16 @@ class DominionProtocolTests(unittest.TestCase):
             )
             self.assertTrue(result.failover_used)
             self.assertIn(result.status, {"approved", "needs_revision"})
+
+    def test_message_bus_unique_event_ids_and_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bus = DominionMessageBus(Path(tmp) / "events.jsonl")
+            first = bus.emit("a", "s", {})
+            second = bus.emit("b", "s", {})
+            self.assertNotEqual(first["event_id"], second["event_id"])
+            tail = bus.tail(limit=1)
+            self.assertEqual(len(tail), 1)
+            self.assertEqual(tail[0]["event_type"], "b")
 
 
 if __name__ == "__main__":
