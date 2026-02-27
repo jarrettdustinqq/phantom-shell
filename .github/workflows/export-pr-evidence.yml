@@ -7,6 +7,11 @@ on:
         description: Pull request number to export evidence for
         required: true
         type: string
+      tamper_test:
+        description: Tamper downloaded JSON before integrity check (expected failure)
+        required: false
+        default: "false"
+        type: string
 
 permissions:
   contents: read
@@ -146,6 +151,13 @@ jobs:
           if ! [[ "${expected_sha}" =~ ^[0-9a-fA-F]{64}$ ]]; then
             echo "::error::Invalid checksum format in ${sha_path}: '${expected_sha}'"
             exit 1
+          fi
+
+          tamper_raw="${{ inputs.tamper_test }}"
+          tamper_flag="$(printf '%s' "${tamper_raw}" | tr '[:upper:]' '[:lower:]')"
+          if [ "${tamper_flag}" = "true" ] || [ "${tamper_flag}" = "1" ] || [ "${tamper_flag}" = "yes" ]; then
+            printf ' ' >> "${json_path}"
+            echo "::notice::Tamper test enabled; injected one-byte change into $(basename "${json_path}") before checksum comparison."
           fi
 
           actual_sha="$(sha256sum "${json_path}" | awk '{ print $1 }')"
