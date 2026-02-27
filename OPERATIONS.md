@@ -38,6 +38,14 @@
   - Mismatch error line: `##[error]Integrity mismatch for pr-11-evidence-tuple-20260227T010934Z.json: expected 5bbd5405417288333a0c418f29af35740618bf9e668ee29ffd4f17d19ba0f8cb, got 9d4127800e3a03efacb064ae9056e3a9462d2356759bfa8ad93eee5c65eb8c2c`
   - Passing run URL: `https://github.com/jarrettdustinqq/phantom-shell/actions/runs/22468366671`
 
+## Nightly Tamper Guardrail
+
+- Purpose: nightly dispatch of `export-pr-evidence.yml` with `tamper_test=true` to prove mismatch detection still fails correctly.
+- Manual dispatch: `gh workflow run nightly-tamper-guardrail.yml -f pr_number=<pr_number>`.
+- PR selection order: workflow `pr_number` input -> repository variable `PR_EVIDENCE_GUARDRAIL_PR_NUMBER` -> default `11`.
+- Pass: export run concludes `failure` and logs include `Integrity mismatch for`.
+- Fail: any other result; workflow opens or updates one marker-backed high-priority issue and fails.
+
 ## 3-Minute Evidence Gate Proof
 
 1. Edit the PR body with this stale-test block and save:
