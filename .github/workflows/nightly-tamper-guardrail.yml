@@ -1,0 +1,329 @@
+name: nightly-tamper-guardrail
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number override (default: repo variable PR_EVIDENCE_GUARDRAIL_PR_NUMBER, then 11)"
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+
+jobs:
+  guardrail:
+    name: tamper-guardrail
+    runs-on: ubuntu-latest
+    env:
+      EXPORT_WORKFLOW_FILE: export-pr-evidence.yml
+      FALLBACK_PR_NUMBER: "11"
+      ISSUE_MARKER: "<!-- tamper-guardrail-regression -->"
+    steps:
+      - name: Resolve PR number
+        id: resolve_pr
+        env:
+          INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number || '' }}
+          REPO_PR_NUMBER: ${{ vars.PR_EVIDENCE_GUARDRAIL_PR_NUMBER || '' }}
+        run: |
+          set -euo pipefail
+
+          selected="${INPUT_PR_NUMBER:-}"
+          source="workflow_dispatch input"
+
+          if [ -z "${selected}" ]; then
+            selected="${REPO_PR_NUMBER:-}"
+            source="repo variable PR_EVIDENCE_GUARDRAIL_PR_NUMBER"
+          fi
+
+          if [ -z "${selected}" ]; then
+            selected="${FALLBACK_PR_NUMBER}"
+            source="hardcoded fallback"
+          fi
+
+          selected="${selected#\#}"
+          if ! [[ "${selected}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Resolved PR number must be numeric (got '${selected}')."
+            exit 1
+          fi
+
+          echo "pr_number=${selected}" >> "${GITHUB_OUTPUT}"
+          echo "source=${source}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved PR #${selected} from ${source}."
+
+      - name: Dispatch export-pr-evidence tamper run
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+
+          dispatch_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          gh workflow run "${EXPORT_WORKFLOW_FILE}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${TARGET_BRANCH}" \
+            -f pr_number="${PR_NUMBER}" \
+            -f tamper_test=true
+
+          export_run_id=""
+          for _ in $(seq 1 30); do
+            runs_json="$(gh run list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --workflow "${EXPORT_WORKFLOW_FILE}" \
+              --event workflow_dispatch \
+              --branch "${TARGET_BRANCH}" \
+              --limit 20 \
+              --json databaseId,createdAt)"
+
+            export_run_id="$(printf '%s' "${runs_json}" | jq -r --arg dispatch_started_at "${dispatch_started_at}" '
+              map(select(.createdAt >= $dispatch_started_at))
+              | sort_by(.createdAt)
+              | reverse
+              | .[0].databaseId // empty
+            ')"
+
+            if [ -n "${export_run_id}" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          if [ -z "${export_run_id}" ]; then
+            echo "::error::Unable to locate dispatched export-pr-evidence run after ${dispatch_started_at}."
+            exit 1
+          fi
+
+          export_run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${export_run_id}"
+          echo "export_run_id=${export_run_id}" >> "${GITHUB_OUTPUT}"
+          echo "export_run_url=${export_run_url}" >> "${GITHUB_OUTPUT}"
+          echo "Dispatched export-pr-evidence run: ${export_run_url}"
+
+      - name: Wait for export run completion
+        id: wait_export
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPORT_RUN_ID: ${{ steps.dispatch.outputs.export_run_id }}
+        run: |
+          set -euo pipefail
+
+          run_status=""
+          run_conclusion=""
+
+          for _ in $(seq 1 120); do
+            run_payload="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${EXPORT_RUN_ID}")"
+            run_status="$(printf '%s' "${run_payload}" | jq -r '.status')"
+            run_conclusion="$(printf '%s' "${run_payload}" | jq -r '.conclusion // ""')"
+
+            if [ "${run_status}" = "completed" ]; then
+              break
+            fi
+            sleep 15
+          done
+
+          if [ "${run_status}" != "completed" ]; then
+            echo "::error::Timed out waiting for export-pr-evidence run ${EXPORT_RUN_ID}."
+            exit 1
+          fi
+
+          echo "export_status=${run_status}" >> "${GITHUB_OUTPUT}"
+          echo "export_conclusion=${run_conclusion}" >> "${GITHUB_OUTPUT}"
+          echo "Observed export-pr-evidence conclusion: ${run_conclusion}"
+
+      - name: Inspect export run logs for mismatch evidence
+        id: inspect_logs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPORT_RUN_ID: ${{ steps.dispatch.outputs.export_run_id }}
+        run: |
+          set -euo pipefail
+
+          log_path="${RUNNER_TEMP}/export-pr-evidence-${EXPORT_RUN_ID}.log"
+          if ! gh run view "${EXPORT_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --log > "${log_path}"; then
+            echo "::warning::Could not fetch logs for run ${EXPORT_RUN_ID}."
+            : > "${log_path}"
+          fi
+
+          mismatch_found="false"
+          if grep -Fq "Integrity mismatch for" "${log_path}"; then
+            mismatch_found="true"
+          fi
+
+          echo "mismatch_found=${mismatch_found}" >> "${GITHUB_OUTPUT}"
+          echo "Mismatch evidence in logs: ${mismatch_found}"
+
+      - name: Evaluate tamper guardrail assertion
+        id: assert_guardrail
+        env:
+          EXPORT_CONCLUSION: ${{ steps.wait_export.outputs.export_conclusion }}
+          MISMATCH_FOUND: ${{ steps.inspect_logs.outputs.mismatch_found }}
+        run: |
+          set -euo pipefail
+
+          observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          assertion_failed="true"
+          if [ "${EXPORT_CONCLUSION}" = "failure" ] && [ "${MISMATCH_FOUND}" = "true" ]; then
+            assertion_failed="false"
+          fi
+
+          echo "observed_at=${observed_at}" >> "${GITHUB_OUTPUT}"
+          echo "assertion_failed=${assertion_failed}" >> "${GITHUB_OUTPUT}"
+
+          if [ "${assertion_failed}" = "false" ]; then
+            echo "Tamper guardrail passed: expected failure + mismatch evidence observed."
+          else
+            echo "::error::Tamper guardrail regression: expected conclusion=failure and mismatch evidence in logs."
+          fi
+
+      - name: Open or update high-priority regression issue
+        if: ${{ steps.assert_guardrail.outputs.assertion_failed == 'true' }}
+        id: upsert_issue
+        uses: actions/github-script@v7
+        env:
+          ISSUE_MARKER: ${{ env.ISSUE_MARKER }}
+          OBSERVED_AT: ${{ steps.assert_guardrail.outputs.observed_at }}
+          EXPORT_RUN_URL: ${{ steps.dispatch.outputs.export_run_url }}
+          EXPORT_RUN_CONCLUSION: ${{ steps.wait_export.outputs.export_conclusion }}
+          MISMATCH_FOUND: ${{ steps.inspect_logs.outputs.mismatch_found }}
+          GUARDRAIL_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GUARDRAIL_RUN_ID: ${{ github.run_id }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+          PR_SOURCE: ${{ steps.resolve_pr.outputs.source }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const marker = process.env.ISSUE_MARKER;
+            const title = "HIGH: Tamper guardrail regression in export-pr-evidence";
+            const observedAt = process.env.OBSERVED_AT;
+            const exportRunUrl = process.env.EXPORT_RUN_URL;
+            const exportRunConclusion = process.env.EXPORT_RUN_CONCLUSION || "unknown";
+            const mismatchFound = process.env.MISMATCH_FOUND;
+            const guardrailRunUrl = process.env.GUARDRAIL_RUN_URL;
+            const guardrailRunId = process.env.GUARDRAIL_RUN_ID;
+            const prNumber = process.env.PR_NUMBER;
+            const prSource = process.env.PR_SOURCE;
+
+            const body = [
+              marker,
+              "# Tamper Guardrail Regression",
+              "",
+              "Priority: High",
+              "",
+              "The nightly tamper guardrail detected unexpected behavior. This issue is auto-upserted.",
+              "",
+              `- Observed at (UTC): ${observedAt}`,
+              `- Guardrail run: ${guardrailRunUrl}`,
+              `- Guardrail run id: ${guardrailRunId}`,
+              `- Target PR: #${prNumber} (${prSource})`,
+              `- Export run: ${exportRunUrl}`,
+              `- Observed export conclusion: ${exportRunConclusion}`,
+              `- Log contains \"Integrity mismatch for\": ${mismatchFound}`,
+              "",
+              "Expected behavior:",
+              "- export-pr-evidence should conclude with failure",
+              "- logs should include \"Integrity mismatch for\"",
+            ].join("\n");
+
+            const { owner, repo } = context.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "all",
+              per_page: 100,
+            });
+
+            const existing = issues.find((issue) => {
+              if (issue.pull_request) {
+                return false;
+              }
+              return (issue.body || "").includes(marker);
+            });
+
+            const labelCandidates = new Set([
+              "priority:high",
+              "priority: high",
+              "priority/high",
+              "priority-high",
+              "high-priority",
+            ]);
+
+            let labels = [];
+            try {
+              const repoLabels = await github.paginate(github.rest.issues.listLabelsForRepo, {
+                owner,
+                repo,
+                per_page: 100,
+              });
+              const highPriority = repoLabels.find((label) => labelCandidates.has((label.name || "").toLowerCase()));
+              if (highPriority) {
+                labels = [highPriority.name];
+              }
+            } catch (error) {
+              core.warning(`Unable to list repository labels: ${error.message}`);
+            }
+
+            let issueNumber;
+            let actionTaken;
+            if (existing) {
+              const updatePayload = {
+                owner,
+                repo,
+                issue_number: existing.number,
+                title,
+                body,
+                state: "open",
+              };
+              if (labels.length > 0) {
+                updatePayload.labels = labels;
+              }
+              await github.rest.issues.update(updatePayload);
+              issueNumber = existing.number;
+              actionTaken = existing.state === "closed" ? "reopened+updated" : "updated";
+            } else {
+              const createPayload = {
+                owner,
+                repo,
+                title,
+                body,
+              };
+              if (labels.length > 0) {
+                createPayload.labels = labels;
+              }
+              const created = await github.rest.issues.create(createPayload);
+              issueNumber = created.data.number;
+              actionTaken = "created";
+            }
+
+            core.setOutput("issue_number", String(issueNumber));
+            core.setOutput("issue_action", actionTaken);
+            core.info(`Regression issue #${issueNumber} ${actionTaken}.`);
+
+      - name: Append workflow summary
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "### Nightly Tamper Guardrail"
+            echo "- PR number: #${{ steps.resolve_pr.outputs.pr_number }} (${{ steps.resolve_pr.outputs.source }})"
+            echo "- Export run: ${{ steps.dispatch.outputs.export_run_url }}"
+            echo "- Export conclusion: ${{ steps.wait_export.outputs.export_conclusion }}"
+            echo "- Log contains 'Integrity mismatch for': ${{ steps.inspect_logs.outputs.mismatch_found }}"
+            echo "- Assertion failed: ${{ steps.assert_guardrail.outputs.assertion_failed }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Fail on guardrail regression
+        if: ${{ steps.assert_guardrail.outputs.assertion_failed == 'true' }}
+        run: |
+          set -euo pipefail
+
+          issue_number="${{ steps.upsert_issue.outputs.issue_number }}"
+          issue_action="${{ steps.upsert_issue.outputs.issue_action }}"
+          echo "::error::Tamper guardrail regression detected. Issue #${issue_number} ${issue_action}."
+          exit 1

@@ -7,6 +7,11 @@ on:
         description: Pull request number to export evidence for
         required: true
         type: string
+      tamper_test:
+        description: Intentionally mutate downloaded artifact before integrity check (expected mismatch)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -127,6 +132,40 @@ jobs:
         with:
           name: ${{ steps.export.outputs.artifact_name }}
           path: ${{ runner.temp }}/uploaded-evidence
+
+      - name: Tamper artifact for integrity guardrail test
+        if: ${{ inputs.tamper_test }}
+        run: |
+          set -euo pipefail
+
+          artifact_dir="${RUNNER_TEMP}/uploaded-evidence"
+          json_path="$(find "${artifact_dir}" -type f -name '*.json' | head -n1 || true)"
+
+          if [ -z "${json_path}" ]; then
+            echo "::error::Tamper test enabled but no .json artifact was found."
+            exit 1
+          fi
+
+          python3 - "${json_path}" <<'PY'
+          import json
+          import sys
+          from datetime import datetime, timezone
+
+          json_path = sys.argv[1]
+          with open(json_path, "r", encoding="utf-8") as fh:
+              payload = json.load(fh)
+
+          payload["tamper_test"] = {
+              "applied_by": "export-pr-evidence",
+              "applied_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+          }
+
+          with open(json_path, "w", encoding="utf-8") as fh:
+              json.dump(payload, fh, indent=2, sort_keys=True)
+              fh.write("\n")
+          PY
+
+          echo "Tamper test applied to $(basename "${json_path}"). Integrity mismatch is expected."
 
       - name: Verify uploaded artifact integrity
         id: integrity
