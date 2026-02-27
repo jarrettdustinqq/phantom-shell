@@ -1,0 +1,111 @@
+name: verify-revoke-evidence
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  evidence:
+    name: evidence-gate
+    runs-on: ubuntu-latest
+    env:
+      MAX_EVIDENCE_AGE_HOURS: "24"
+    steps:
+      - name: Validate verify/revoke evidence
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          from datetime import datetime, timedelta, timezone
+
+          body = os.getenv("PR_BODY") or ""
+          max_age_hours = int(os.getenv("MAX_EVIDENCE_AGE_HOURS", "24"))
+          max_age = timedelta(hours=max_age_hours)
+          now = datetime.now(timezone.utc)
+
+          checked_item = re.search(
+              r"(?im)^-\s*\[(x|X)\]\s*verify-revoke-smoke evidence pair attached in exact format\s*$",
+              body,
+          )
+          unchecked_item = re.search(
+              r"(?im)^-\s*\[\s\]\s*verify-revoke-smoke evidence pair attached in exact format\s*$",
+              body,
+          )
+
+          verify_match = re.search(r"(?i)\bverify\s*=\s*([^\s,`]+)", body)
+          revoke_match = re.search(r"(?i)\brevoke\s*=\s*([^\s,`]+)", body)
+
+          errors = []
+
+          if not checked_item:
+              if unchecked_item:
+                  errors.append(
+                      "Checklist item is not checked: '- [x] verify-revoke-smoke evidence pair attached in exact format'."
+                  )
+              else:
+                  errors.append(
+                      "Missing checklist item: '- [x] verify-revoke-smoke evidence pair attached in exact format'."
+                  )
+
+          if not verify_match:
+              errors.append("Missing required field: verify=<timestamp>.")
+          if not revoke_match:
+              errors.append("Missing required field: revoke=<timestamp>.")
+
+          iso_pattern = re.compile(
+              r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$"
+          )
+
+          def parse_and_validate(label: str, value: str):
+              if not iso_pattern.fullmatch(value):
+                  errors.append(
+                      f"Invalid {label} timestamp '{value}'. Use ISO-8601 UTC like 2026-02-26T16:00:00Z."
+                  )
+                  return None
+              try:
+                  ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
+              except ValueError:
+                  errors.append(
+                      f"Could not parse {label} timestamp '{value}'. Use ISO-8601 UTC like 2026-02-26T16:00:00Z."
+                  )
+                  return None
+              if ts.tzinfo is None or ts.utcoffset() != timedelta(0):
+                  errors.append(
+                      f"{label} must be UTC (Z or +00:00). Found '{value}'."
+                  )
+                  return None
+              age = now - ts.astimezone(timezone.utc)
+              if age < timedelta(minutes=-5):
+                  errors.append(f"{label} is in the future: '{value}'.")
+              elif age > max_age:
+                  errors.append(
+                      f"{label} is stale ({age}). Must be within {max_age_hours}h."
+                  )
+              return ts
+
+          if verify_match:
+              parse_and_validate("verify", verify_match.group(1))
+          if revoke_match:
+              parse_and_validate("revoke", revoke_match.group(1))
+
+          if errors:
+              print("::error::PR evidence gate failed.")
+              for err in errors:
+                  print(f"::error::{err}")
+              print("Paste this exact block in the PR body:")
+              print("verify-revoke-smoke:")
+              print("verify=2026-02-26T16:00:00Z")
+              print("revoke=2026-02-26T16:05:00Z")
+              print("- [x] verify-revoke-smoke evidence pair attached in exact format")
+              sys.exit(1)
+
+          print("Evidence gate passed: verify/revoke timestamps are present, valid, and fresh.")
+          PY
