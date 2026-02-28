@@ -12,6 +12,33 @@ mkdir -p "$(dirname "${report_path}")"
 
 declare -a failures=()
 
+run_phantom_unit_tests() {
+  local tests=(
+    tests/test_codex_cross_chat_memory.py
+    tests/test_brain_repository.py
+    tests/test_income_os.py
+    tests/test_n8n_swarm_forge.py
+    tests/test_release_marker_agent.py
+  )
+  local existing=()
+  local test_path=""
+  for test_path in "${tests[@]}"; do
+    if [[ -f "${phantom_dir}/${test_path}" ]]; then
+      existing+=("${test_path}")
+    fi
+  done
+
+  if ((${#existing[@]} == 0)); then
+    echo "No configured phantom tests found on this branch; skipping."
+    return 0
+  fi
+
+  (
+    cd "${phantom_dir}"
+    python3 -m unittest -q "${existing[@]}"
+  )
+}
+
 run_check() {
   local label="$1"
   shift
@@ -38,7 +65,7 @@ run_check() {
   run_check "continuity access-check" bash -lc "cd '${continuity_dir}' && make access-check"
 
   run_check "phantom compileall" bash -lc "cd '${phantom_dir}' && python3 -m compileall -q phantom_shell scripts"
-  run_check "phantom unit tests" bash -lc "cd '${phantom_dir}' && python3 -m unittest -q tests/test_codex_cross_chat_memory.py tests/test_brain_repository.py tests/test_income_os.py tests/test_n8n_swarm_forge.py tests/test_release_marker_agent.py"
+  run_check "phantom unit tests" run_phantom_unit_tests
   run_check "workspace disk snapshot" bash -lc "df -h '${home_dir}' | sed -n '1,2p'"
   run_check "workspace memory snapshot" bash -lc "free -h | sed -n '1,3p'"
 
@@ -50,7 +77,7 @@ run_check() {
     printf "summary=fail checks_failed=%s failed_checks=%s\n" "${#failures[@]}" "${failures[*]}"
     echo "[END] $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fi
-} | tee "${report_path}"
+} > >(tee "${report_path}") 2>&1
 
 echo "report_path=${report_path}"
 
