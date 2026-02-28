@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  collector:
+    build: ./collector
+    container_name: collector
+    restart: always
+    volumes:
+      - ./data:/data
+
+  signal-engine:
+    build: ./signal
+    container_name: signal-engine
+    restart: always
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/data
+      - ./config:/config
+    depends_on:
+      - collector
+
+  paper-trade:
+    build: ./papertrade
+    container_name: paper-trade
+    restart: always
+    volumes:
+      - ./data:/data
+    depends_on:
+      - signal-engine
