@@ -1,0 +1,5 @@
+- id: thread_exec_terminal
+  node: DR-04
+  category: operations
+  path: nodes/operations/thread_exec_terminal.md
+  priority: high
