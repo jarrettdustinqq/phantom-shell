@@ -6,4 +6,4 @@ verify:
 	@$(PY) ./scripts/verify_config.py
 
 test:
-	@$(PY) -m unittest discover -s tests -p 'test_*.py' -v
+	@$(PY) -m pytest tests/ -v
