@@ -8,7 +8,17 @@ from fastapi import FastAPI, HTTPException
 from openai import OpenAI
 from pydantic import BaseModel
 
+from phantom_shell.http_policy import (
+    URLPolicyError,
+    bounded_timeout,
+    safe_display_url,
+    safe_response_headers,
+    validate_outbound_url,
+)
+
+
 app = FastAPI(title="Phantom Shell Python Agent")
+ALLOWED_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}
 
 
 def _get_openai_client() -> Optional[OpenAI]:
@@ -33,29 +43,46 @@ class AgentResponse(BaseModel):
 
 
 def _run_http_request(spec: Dict[str, Any]) -> Dict[str, Any]:
-    """Perform a simple HTTP request to connect with external apps/APIs.
-
-    The spec should include at least a `url`. Optional fields:
-    - method: HTTP verb (default GET)
-    - headers: dict of headers
-    - json/body/query params depending on your target API
-    """
+    """Perform a policy-checked HTTP request to an external HTTPS API."""
 
     params = spec.get("params", {}) or {}
-    url = params.get("url")
-    method = (params.get("method") or "GET").upper()
+    raw_url = params.get("url")
+    method = str(params.get("method") or "GET").upper()
     headers = params.get("headers")
     json_payload = params.get("json")
     data = params.get("data")
-    timeout = params.get("timeout", 10)
 
-    if not url:
+    if not raw_url:
         return {
             "tool": "http_request",
             "status": "skipped",
             "reason": "No URL provided",
             "method": method,
         }
+
+    if method not in ALLOWED_HTTP_METHODS:
+        return {
+            "tool": "http_request",
+            "status": "blocked",
+            "reason": f"Unsupported HTTP method: {method}",
+            "method": method,
+        }
+
+    try:
+        url = validate_outbound_url(
+            str(raw_url),
+            allow_private=os.getenv("PHANTOM_ALLOW_PRIVATE_HTTP_TARGETS") == "1",
+        )
+    except URLPolicyError as exc:
+        return {
+            "tool": "http_request",
+            "status": "blocked",
+            "reason": str(exc),
+            "method": method,
+        }
+
+    timeout = bounded_timeout(params.get("timeout", 10))
+    display_url = safe_display_url(url)
 
     try:
         response = httpx.request(
@@ -70,16 +97,16 @@ def _run_http_request(spec: Dict[str, Any]) -> Dict[str, Any]:
             "tool": "http_request",
             "status": response.status_code,
             "method": method,
-            "url": url,
+            "url": display_url,
             "response_preview": response.text[:1000],
-            "headers": dict(response.headers),
+            "headers": safe_response_headers(response.headers),
         }
     except Exception as exc:  # noqa: BLE001
         return {
             "tool": "http_request",
             "status": "error",
             "method": method,
-            "url": url,
+            "url": display_url,
             "error": str(exc),
         }
 
@@ -100,7 +127,24 @@ def _run_slack_webhook(spec: Dict[str, Any], default_message: str) -> Dict[str, 
         }
 
     try:
-        response = httpx.post(webhook_url, json={"text": message}, timeout=params.get("timeout", 10))
+        safe_webhook_url = validate_outbound_url(
+            str(webhook_url),
+            allow_private=os.getenv("PHANTOM_ALLOW_PRIVATE_HTTP_TARGETS") == "1",
+        )
+    except URLPolicyError as exc:
+        return {
+            "tool": "slack_webhook",
+            "status": "blocked",
+            "reason": str(exc),
+            "message": message,
+        }
+
+    try:
+        response = httpx.post(
+            safe_webhook_url,
+            json={"text": message},
+            timeout=bounded_timeout(params.get("timeout", 10)),
+        )
         return {
             "tool": "slack_webhook",
             "status": response.status_code,
@@ -115,20 +159,15 @@ def _run_slack_webhook(spec: Dict[str, Any], default_message: str) -> Dict[str, 
         }
 
 
-def run_tools(instruction: str, context: Optional[Dict[str, Any]], tool_specs: Optional[List[Dict[str, Any]]]):
-    """Extend this function with your own tooling logic.
-
-    The default catalog includes:
-    - http_request: make an HTTP call to any app/API to fetch or post data.
-    - slack_webhook: send a message to Slack using an incoming webhook URL.
-    - echo: always present to reflect the instruction/context for tracing.
-    """
+def run_tools(
+    instruction: str,
+    context: Optional[Dict[str, Any]],
+    tool_specs: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Execute the small built-in tool catalog."""
 
     outputs: List[Dict[str, Any]] = []
-    specs = tool_specs or []
-
-    if not specs:
-        specs = [{"name": "echo", "params": {}}]
+    specs = tool_specs or [{"name": "echo", "params": {}}]
 
     for spec in specs:
         name = (spec.get("name") or "").lower()
@@ -154,13 +193,12 @@ def run_openai_reasoning(instruction: str, tool_outputs: List[Dict[str, Any]]) -
 
     client = _get_openai_client()
 
-    # Provide an offline-friendly summary when no OpenAI key is configured.
     if client is None:
         summary_lines = [
             "OpenAI key not set – returning offline summary.",
             f"Instruction: {instruction}",
             f"Observed tool outputs ({len(tool_outputs)}): {tool_outputs}",
-            "Set an OPENAI_API_KEY environment variable (or .env secret) locally to enable live reasoning.",
+            "Set an OPENAI_API_KEY environment variable locally to enable live reasoning.",
         ]
         return "\n".join(summary_lines)
 
@@ -182,14 +220,14 @@ def run_openai_reasoning(instruction: str, tool_outputs: List[Dict[str, Any]]) -
             temperature=0.2,
             max_tokens=300,
         )
-        return response.choices[0].message.content
+        return response.choices[0].message.content or ""
     except Exception as exc:  # noqa: BLE001
         fallback_lines = [
             "OpenAI call failed – returning offline summary.",
             f"Reason: {exc}",
             f"Instruction: {instruction}",
             f"Observed tool outputs ({len(tool_outputs)}): {tool_outputs}",
-            "Verify your OPENAI_API_KEY is set locally and that networking allows access to the OpenAI endpoint.",
+            "Verify your OPENAI_API_KEY is set locally and that networking allows access to the endpoint.",
         ]
         return "\n".join(fallback_lines)
 
@@ -201,7 +239,6 @@ async def execute_agent(request: AgentRequest):
 
     tool_outputs = run_tools(request.instruction, request.context, request.tool_specs)
     reasoning = run_openai_reasoning(request.instruction, tool_outputs)
-
     return AgentResponse(result=reasoning, raw_tool_outputs=tool_outputs)
 
 
