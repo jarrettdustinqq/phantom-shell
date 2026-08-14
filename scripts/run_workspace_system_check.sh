@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# run_workspace_system_check.sh — Workspace-wide health check for Logan Ryker's Continuity System
+# run_workspace_system_check.sh — Workspace-wide health check for Jarrett's agent system.
 # Validates fleet, phantom-shell, and continuity-spine health in one auditable run.
 set -euo pipefail
 
 home_dir="${HOME:-/home/jarrettdustinqq}"
-fleet_dir="${home_dir}/projects/fleet"
-continuity_dir="${home_dir}/control_station/continuity_spine"
-phantom_dir="${home_dir}/projects/phantom-shell"
+fleet_dir="${FLEET_DIR:-${home_dir}/projects/fleet}"
+continuity_dir="${CONTINUITY_DIR:-${home_dir}/control_station/continuity_spine}"
+phantom_dir="${PHANTOM_DIR:-${home_dir}/projects/phantom-shell}"
 
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-report_path="${phantom_dir}/reports/workspace-system-check-$(date -u +%Y%m%dT%H%M%SZ).log"
-mkdir -p "$(dirname "${report_path}")"
+if [[ -d "${phantom_dir}" ]]; then
+  report_dir="${REPORT_DIR:-${phantom_dir}/reports}"
+else
+  report_dir="${REPORT_DIR:-${TMPDIR:-/tmp}/phantom-shell-reports}"
+fi
+report_path="${report_dir}/workspace-system-check-$(date -u +%Y%m%dT%H%M%SZ).log"
+mkdir -p "${report_dir}"
 
 declare -a failures=()
 
@@ -23,24 +28,26 @@ run_phantom_tests() {
     tests/test_shell.py
     tests/test_verify_config.py
   )
-  local existing=()
+  local missing=()
   local test_path=""
+
   for test_path in "${tests[@]}"; do
-    if [[ -f "${phantom_dir}/${test_path}" ]]; then
-      existing+=("${test_path}")
+    if [[ ! -f "${phantom_dir}/${test_path}" ]]; then
+      missing+=("${test_path}")
     fi
   done
 
-  if ((${#existing[@]} == 0)); then
-    echo "No phantom tests found; skipping."
-    return 0
+  if ((${#missing[@]} > 0)); then
+    printf 'Missing required phantom test files:' >&2
+    printf ' %s' "${missing[@]}" >&2
+    printf '\n' >&2
+    return 2
   fi
 
-  echo "Running ${#existing[@]} test files..."
+  echo "Running ${#tests[@]} required test files..."
   (
     cd "${phantom_dir}"
-    python3 -m pip install -q -r requirements.txt 2>/dev/null || true
-    python3 -m pytest "${existing[@]}" -q
+    python3 -m pytest "${tests[@]}" -q
   )
 }
 
@@ -60,6 +67,9 @@ run_check() {
 
 {
   echo "[BEGIN] ${started_at}"
+  echo "fleet_dir=${fleet_dir}"
+  echo "continuity_dir=${continuity_dir}"
+  echo "phantom_dir=${phantom_dir}"
 
   run_check "fleet health"       bash -lc "cd '${fleet_dir}' && ./fleetctl health"
   run_check "fleet shell syntax" bash -lc "cd '${fleet_dir}' && bash -n bootstrap.sh healthcheck.sh install_nix.sh fleetctl"
@@ -70,7 +80,10 @@ run_check() {
     run_check "continuity verify"       bash -lc "cd '${continuity_dir}' && make verify"
     run_check "continuity access-check" bash -lc "cd '${continuity_dir}' && make access-check"
   else
-    echo; echo "== continuity checks =="; echo "result=skip (continuity_dir not found at ${continuity_dir})"
+    echo
+    echo "== continuity checkout =="
+    echo "result=fail missing_required_directory=${continuity_dir}"
+    failures+=("continuity checkout")
   fi
 
   run_check "phantom compileall" bash -lc "cd '${phantom_dir}' && python3 -m compileall -q phantom_shell scripts"
