@@ -6,17 +6,32 @@
 - Ask for manual user action only when blocked by permissions, tool limits, or safety constraints.
 - When blocked, state the blocker and the smallest required user step.
 
-## Pre-PR Checklist
+## Pre-PR Verification Contract
 
-- [ ] Before merge, paste the latest `verify-revoke-smoke` timestamp pair from the current run (`verify=<timestamp>`, `revoke=<timestamp>`).
+The required `verify-revoke-evidence / evidence-gate` is an automatic exact-head repository verification gate.
+
+It must:
+
+1. check out `github.event.pull_request.head.sha` explicitly;
+2. assert the checked-out commit equals that exact head SHA;
+3. install the repository dependencies from `requirements.txt`;
+4. run `scripts/verify_config.py`;
+5. run the repository pytest suite.
+
+A contributor cannot satisfy this check by editing the PR body. Typed timestamps, checklist claims, and other self-attestation are not verification evidence.
+
+The former `verify-revoke-smoke` timestamp requirement was retired because the repository contained no corresponding smoke implementation. Do not recreate a fictional command or use fresh timestamps as proof. If a real verify/revoke capability is introduced later, give it an executable implementation and independently verifiable evidence tied to the exact commit before making it a required gate.
 
 ## Branch Protection
 
 - Require status check `verify-revoke-evidence / evidence-gate` on protected branches.
+- Keep ordinary `phantom-shell-ci` required where configured.
+- A passing check proves only the code and tests executed by that workflow on the exact PR head; it does not prove host deployment or external runtime state.
 
 ## Permanent PR Evidence Export
 
 - Run `make export-evidence-tuple PR=<pr_number>` to write a timestamped JSON tuple, markdown index, and sha256 file under `/home/jarrettdustinqq/incident-evidence/phantom-shell/`.
+- The export records PR/status-check observations for audit. Legacy verify/revoke timestamp fields may be absent and are not required for readiness.
 
 ## Dispatch PR Evidence Export (CI)
 
@@ -33,10 +48,6 @@
   - Failing run URL: `<paste failing run URL>`
   - Mismatch error line: `<paste exact mismatch error line>`
   - Passing run URL: `<paste passing run URL>`
-- Example record (PR #11, 2026-02-27):
-  - Failing run URL: `https://github.com/jarrettdustinqq/phantom-shell/actions/runs/22468354892`
-  - Mismatch error line: `##[error]Integrity mismatch for pr-11-evidence-tuple-20260227T010934Z.json: expected 5bbd5405417288333a0c418f29af35740618bf9e668ee29ffd4f17d19ba0f8cb, got 9d4127800e3a03efacb064ae9056e3a9462d2356759bfa8ad93eee5c65eb8c2c`
-  - Passing run URL: `https://github.com/jarrettdustinqq/phantom-shell/actions/runs/22468366671`
 
 ## Nightly Tamper Guardrail
 
@@ -45,28 +56,3 @@
 - PR selection order: workflow `pr_number` input -> repository variable `PR_EVIDENCE_GUARDRAIL_PR_NUMBER` -> default `11`.
 - Pass: export run concludes `failure` and logs include `Integrity mismatch for`.
 - Fail: any other result; workflow opens or updates one marker-backed high-priority issue and fails.
-
-## 3-Minute Evidence Gate Proof
-
-1. Edit the PR body with this stale-test block and save:
-
-```text
-verify-revoke-smoke:
-verify=2026-01-01T00:00:00Z
-revoke=2026-01-01T00:05:00Z
-- [x] verify-revoke-smoke evidence pair attached in exact format
-```
-
-Expected: `verify-revoke-evidence / evidence-gate` fails.
-
-2. Run `make verify-revoke-smoke`, then use the current run timestamps: `verify=<rotate_plan_ts>` and `revoke=<rotate_exec_ts>`.
-3. Replace the PR body with this fresh-test block (using your current run values) and save:
-
-```text
-verify-revoke-smoke:
-verify=<rotate_plan_ts>
-revoke=<rotate_exec_ts>
-- [x] verify-revoke-smoke evidence pair attached in exact format
-```
-
-Expected: `verify-revoke-evidence / evidence-gate` passes.
