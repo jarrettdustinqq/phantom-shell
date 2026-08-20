@@ -34,7 +34,7 @@ def test_agent_executes_policy_checked_http_tool(monkeypatch):
     )
     seen = {}
 
-    def fake_request(
+    def fake_stream(
         method,
         url,
         headers=None,
@@ -54,15 +54,23 @@ def test_agent_executes_policy_checked_http_tool(monkeypatch):
 
         class Response:
             status_code = 202
-            text = "synthetic response"
             headers = {
                 "content-type": "text/plain",
                 "set-cookie": "session=secret",
             }
 
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):  # noqa: ANN001
+                return False
+
+            def iter_raw(self):
+                yield b"synthetic response"
+
         return Response()
 
-    monkeypatch.setattr("agent.httpx.request", fake_request)
+    monkeypatch.setattr("agent.httpx.stream", fake_stream)
 
     client = TestClient(app)
     response = client.post(
@@ -83,10 +91,56 @@ def test_agent_executes_policy_checked_http_tool(monkeypatch):
     assert first_tool["tool"] == "http_request"
     assert first_tool["status"] == 202
     assert first_tool["url"] == "https://example.com/api"
+    assert first_tool["response_preview"] == "synthetic response"
+    assert first_tool["response_truncated"] is False
     assert first_tool["headers"] == {"content-type": "text/plain"}
     assert seen["timeout"] == 30.0
     assert seen["follow_redirects"] is False
     assert seen["trust_env"] is False
+
+
+def test_agent_stops_reading_oversized_http_response(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "agent.validate_outbound_url",
+        lambda raw_url, *, allow_private: "https://example.com/large",
+    )
+    chunks_read = []
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/octet-stream"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):  # noqa: ANN001
+            return False
+
+        def iter_raw(self):
+            for chunk in (b"a" * 700, b"b" * 700, b"unreachable"):
+                chunks_read.append(len(chunk))
+                yield chunk
+
+    monkeypatch.setattr("agent.httpx.stream", lambda **kwargs: Response())
+
+    client = TestClient(app)
+    response = client.post(
+        "/agent",
+        json={
+            "instruction": "read bounded response",
+            "tool_specs": [
+                {"name": "http_request", "params": {"url": "https://example.com/large"}}
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    output = response.json()["raw_tool_outputs"][0]
+    assert len(output["response_preview"].encode("utf-8")) == 1000
+    assert output["response_preview"] == ("a" * 700) + ("b" * 300)
+    assert output["response_truncated"] is True
+    assert chunks_read == [700, 700]
 
 
 def test_agent_blocks_unsupported_http_method(monkeypatch):
