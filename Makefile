@@ -1,4 +1,4 @@
-.PHONY: verify test deps
+.PHONY: verify test deps export-evidence-tuple
 
 PY ?= python3
 
@@ -10,3 +10,7 @@ verify: deps
 
 test: deps
 	@$(PY) -m pytest tests/ -v
+
+export-evidence-tuple:
+	@test -n "$(PR)" || (echo "error: PR=<pull_request_number> is required" >&2; exit 2)
+	@./scripts/export_pr_evidence_tuple.sh "$(PR)"
