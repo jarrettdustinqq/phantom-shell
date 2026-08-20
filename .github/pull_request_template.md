@@ -1,15 +1,8 @@
-## Required Evidence
+## Required Verification
 
-- [ ] verify-revoke-smoke evidence pair attached in exact format
+- [ ] `phantom-shell-ci` is green on the final PR head where required.
+- [ ] `verify-revoke-evidence / evidence-gate` is green on the exact final PR head.
 
-Run `make verify-revoke-smoke` and paste this block with real UTC timestamps:
+The evidence gate runs repository verification and tests automatically. Do not paste self-authored verify/revoke timestamps or claim that PR-body text proves a smoke run occurred.
 
-```text
-verify-revoke-smoke:
-verify=YYYY-MM-DDTHH:MM:SSZ
-revoke=YYYY-MM-DDTHH:MM:SSZ
-```
-
-Notes:
-- Keep both timestamps within the last 24 hours.
-- Use UTC (`Z` or `+00:00`), with `Z` preferred.
+If this change affects an external host, service, credential, or deployment, record that external verification separately; repository CI does not prove deployment state.
