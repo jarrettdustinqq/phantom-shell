@@ -18,6 +18,7 @@ from phantom_shell.http_policy import (
 
 app = FastAPI(title="Phantom Shell Python Agent")
 ALLOWED_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}
+MAX_RESPONSE_PREVIEW_BYTES = 1000
 
 
 def _get_openai_client() -> Optional[OpenAI]:
@@ -91,7 +92,7 @@ def _run_http_request(spec: Dict[str, Any]) -> Dict[str, Any]:
     display_url = safe_display_url(url)
 
     try:
-        response = httpx.request(
+        with httpx.stream(
             method=method,
             url=url,
             headers=headers,
@@ -100,14 +101,31 @@ def _run_http_request(spec: Dict[str, Any]) -> Dict[str, Any]:
             timeout=timeout,
             follow_redirects=False,
             trust_env=False,
-        )
+        ) as response:
+            preview = bytearray()
+            truncated = False
+            for chunk in response.iter_raw():
+                remaining = MAX_RESPONSE_PREVIEW_BYTES - len(preview)
+                if len(chunk) > remaining:
+                    preview.extend(chunk[:remaining])
+                    truncated = True
+                    break
+                preview.extend(chunk)
+                if len(preview) == MAX_RESPONSE_PREVIEW_BYTES:
+                    truncated = True
+                    break
+
+            status_code = response.status_code
+            response_headers = safe_response_headers(response.headers)
+
         return {
             "tool": "http_request",
-            "status": response.status_code,
+            "status": status_code,
             "method": method,
             "url": display_url,
-            "response_preview": response.text[:1000],
-            "headers": safe_response_headers(response.headers),
+            "response_preview": bytes(preview).decode("utf-8", errors="replace"),
+            "response_truncated": truncated,
+            "headers": response_headers,
         }
     except Exception as exc:  # noqa: BLE001
         return {
