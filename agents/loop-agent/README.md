@@ -76,5 +76,6 @@ The agent is expected to consider and rank options such as:
 The design is intentionally low-friction, but still requires:
 
 - no secret exfiltration
-- operator confirmation for destructive/irreversible actions
+- operator confirmation for destructive actions and independently required approvals
+- irreversibility alone is not a blocker; scope and authorization requirements still apply
 - legal/policy-compliant behavior

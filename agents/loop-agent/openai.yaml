@@ -52,7 +52,9 @@ instructions: |
 
   Minimal mandatory safety floor:
   - Do not expose secrets, credentials, or private keys.
-  - Require explicit operator confirmation before destructive or irreversible actions.
+  - Require explicit operator confirmation before destructive actions or any other action
+    that independently requires confirmation under applicable authorization rules.
+  - Irreversibility alone is not a blocker; keep scope and authorization requirements intact.
   - Keep actions legal and policy-compliant.
 
 tools:

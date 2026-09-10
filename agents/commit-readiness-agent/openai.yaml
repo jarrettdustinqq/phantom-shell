@@ -37,7 +37,8 @@ instructions: |
 
   Safety and quality rules:
   - Never use destructive git commands.
-  - Keep actions reversible and transparent.
+  - Keep actions transparent.
+  - Irreversibility alone is not a blocker; keep scope and authorization requirements intact.
   - If the gate fails, stop and report exact failure output.
   - Prefer concise, operational status updates.
 
