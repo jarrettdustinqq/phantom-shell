@@ -26,6 +26,9 @@ def truncate(text: str, max_chars: int = 1600) -> str:
 
 
 def format_cycle(cycle: LoopCycle) -> str:
+    measured = cycle.result_delta.get("mode") == "measured"
+    change_label = "change_reported" if measured else "change_proposed"
+    actual_delta = cycle.result_delta.get("actual_delta") if measured else None
     tool_lines = []
     for item in cycle.recommended_tools.get("tools", [])[:4]:
         tool_lines.append(
@@ -38,15 +41,15 @@ def format_cycle(cycle: LoopCycle) -> str:
             f"Cycle {cycle.cycle_number} @ {cycle.timestamp}",
             f"objective: {cycle.objective}",
             f"baseline: score={cycle.baseline.get('score')} strategy={cycle.baseline.get('strategy')}",
-            f"change_applied: {cycle.change_applied}",
+            f"{change_label}: {cycle.change_applied}",
             (
                 "result_delta: "
                 f"mode={cycle.result_delta.get('mode')} "
-                f"actual={cycle.result_delta.get('actual_delta')} "
+                f"actual={actual_delta if actual_delta is not None else 'unknown'} "
                 f"projected={cycle.result_delta.get('projected_delta')} "
                 f"new_score={cycle.result_delta.get('new_score')}"
             ),
-            f"self_update: {cycle.self_update}",
+            f"self_update: {cycle.self_update if measured else 'No measured outcome; no evidence-based promotion.'}",
             "recommended_tools:",
             *tool_lines,
             f"next_decision: {cycle.next_decision}",
@@ -78,7 +81,7 @@ def help_text() -> str:
         Tips:
           - If no objective is set, run: /objective <your goal>
           - For /cycle, you can provide a measured score when prompted.
-          - /autopilot uses projected scores and runs fast loop batches.
+          - /autopilot records proposals; projections do not update stored scores or the playbook.
         """
     ).strip()
 
@@ -149,8 +152,8 @@ def run_autopilot(engine: LoopAgentEngine, args: list[str]) -> None:
         cycle = engine.run_cycle(note=f"{note} [auto {idx + 1}/{count}]".strip())
         print(
             f"[autopilot] cycle={cycle.cycle_number} "
-            f"delta={cycle.result_delta.get('actual_delta')} "
-            f"score={cycle.result_delta.get('new_score')} "
+            f"projected_score={cycle.result_delta.get('projected_score')} "
+            f"recorded_score={engine.state.current_score} "
             f"decision={cycle.next_decision}"
         )
 

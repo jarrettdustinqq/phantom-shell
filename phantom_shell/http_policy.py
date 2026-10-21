@@ -35,7 +35,8 @@ SAFE_RESPONSE_HEADERS = {
 
 def _is_public_address(value: str) -> bool:
     address = ipaddress.ip_address(value)
-    return bool(address.is_global)
+    # is_global also includes multicast; these are not public unicast targets.
+    return bool(address.is_global and not address.is_multicast)
 
 
 def _resolved_addresses(hostname: str, resolver: Resolver) -> set[str]:
