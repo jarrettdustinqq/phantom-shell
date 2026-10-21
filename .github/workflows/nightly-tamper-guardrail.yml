@@ -151,7 +151,9 @@ jobs:
           fi
 
           mismatch_found="false"
-          if grep -Fq "Integrity mismatch for" "${log_path}"; then
+          # GitHub echoes shell source into logs before execution. Accept only a
+          # timestamped runtime error annotation, never a marker in that source.
+          if grep -Eq '(^|[[:space:]])[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z[[:space:]]+##\[error\]Integrity mismatch for .+: expected [0-9a-fA-F]{64}, got [0-9a-fA-F]{64}$' "${log_path}"; then
             mismatch_found="true"
           fi
 

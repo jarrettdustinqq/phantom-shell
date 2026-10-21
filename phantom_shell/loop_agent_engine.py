@@ -345,17 +345,24 @@ class LoopAgentEngine:
         selected = candidates[0]
         projected_delta = self._projected_delta(selected, cycle_number)
         previous_score = self.state.current_score
+        projected_score = clamp_score(previous_score + projected_delta)
         if measured_score is None:
-            updated_score = clamp_score(previous_score + projected_delta)
+            updated_score = previous_score
             measurement_mode = "projected"
+            delta = None
         else:
             updated_score = clamp_score(measured_score)
             measurement_mode = "measured"
-        delta = round(updated_score - previous_score, 2)
-        self.state.current_score = updated_score
-        self.state.strategy = selected
+            delta = round(updated_score - previous_score, 2)
+            self.state.current_score = updated_score
+            self.state.strategy = selected
 
-        if delta >= 2.0:
+        if delta is None:
+            self_update = (
+                "Proposal only; collect a measured outcome before changing "
+                "the stored score, strategy, or playbook."
+            )
+        elif delta >= 2.0:
             self_update = (
                 f"Promote pattern to playbook default: {selected} "
                 "(evidence: positive delta >= 2.0)."
@@ -370,14 +377,16 @@ class LoopAgentEngine:
                 f"Demote current tactic and test alternate next cycle: {fallback}."
             )
 
-        if self_update not in self.state.playbook:
+        if delta is not None and self_update not in self.state.playbook:
             self.state.playbook.append(self_update)
 
         recommended_tools = {
             "tools": [asdict(item) for item in self.recommend_tools()],
             "targets": self.recommend_targets(),
         }
-        if delta > 0.5:
+        if delta is None:
+            next_decision = "collect_measurement"
+        elif delta > 0.5:
             next_decision = "continue"
         elif delta >= 0.0:
             next_decision = "continue_with_alternate_candidate"
@@ -393,6 +402,7 @@ class LoopAgentEngine:
             result_delta={
                 "mode": measurement_mode,
                 "projected_delta": projected_delta,
+                "projected_score": projected_score,
                 "actual_delta": delta,
                 "new_score": updated_score,
             },
@@ -502,16 +512,25 @@ class LoopAgentEngine:
             lines.append(f"- {item}")
         lines.extend(["", "## Cycles", ""])
         for cycle in self.state.cycles:
+            mode = cycle.result_delta.get("mode", "unknown")
+            measured = mode == "measured"
+            actual_delta = cycle.result_delta.get("actual_delta") if measured else None
+            projected_score = cycle.result_delta.get("projected_score")
+            if projected_score is None and mode == "projected":
+                projected_score = cycle.result_delta.get("new_score")
+            change_label = "Reported change" if measured else "Proposed change"
             lines.extend(
                 [
                     f"### Cycle {cycle.cycle_number}",
                     f"- Timestamp: {cycle.timestamp}",
                     f"- Baseline score: {cycle.baseline.get('score')}",
                     f"- Strategy: {cycle.baseline.get('strategy')}",
-                    f"- Change applied: {cycle.change_applied}",
-                    f"- Delta: {cycle.result_delta.get('actual_delta')}",
-                    f"- New score: {cycle.result_delta.get('new_score')}",
-                    f"- Self update: {cycle.self_update}",
+                    f"- {change_label}: {cycle.change_applied}",
+                    f"- Measurement mode: {mode}",
+                    f"- Measured delta: {actual_delta if actual_delta is not None else 'unknown'}",
+                    f"- Projected score: {projected_score}",
+                    f"- Recorded score: {cycle.result_delta.get('new_score') if measured else 'unchanged (projection only)'}",
+                    f"- Self update: {cycle.self_update if measured else 'No measured outcome; no evidence-based promotion.'}",
                     f"- Next decision: {cycle.next_decision}",
                     "",
                     "Recommended tools:",
