@@ -35,6 +35,9 @@ SAFE_RESPONSE_HEADERS = {
 
 def _is_public_address(value: str) -> bool:
     address = ipaddress.ip_address(value)
+    # Older Python versions do not classify mapped multicast as multicast.
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
     # is_global also includes multicast; these are not public unicast targets.
     return bool(address.is_global and not address.is_multicast)
 

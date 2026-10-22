@@ -123,7 +123,7 @@ def prompt_measured_score() -> float | None:
     if not raw:
         return None
     value = parse_float(raw)
-    if value < 0 or value > 100:
+    if not 0 <= value <= 100:
         raise ValueError("Measured score must be in range 0-100.")
     return value
 
