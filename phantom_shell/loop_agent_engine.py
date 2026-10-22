@@ -8,6 +8,7 @@ from html import unescape
 from pathlib import Path
 from typing import Any
 import json
+import math
 import re
 import subprocess
 import sys
@@ -145,6 +146,8 @@ def utc_now_iso() -> str:
 
 
 def clamp_score(value: float) -> float:
+    if not math.isfinite(value):
+        raise ValueError("Score must be finite.")
     return max(0.0, min(100.0, round(value, 2)))
 
 
@@ -332,6 +335,9 @@ class LoopAgentEngine:
         return TARGET_CATALOG[: max(1, limit)]
 
     def run_cycle(self, note: str = "", measured_score: float | None = None) -> LoopCycle:
+        # Reject invalid observations before changing even the default objective.
+        if measured_score is not None:
+            measured_score = clamp_score(measured_score)
         if not self.state.objective:
             self.state.objective = "Increase execution throughput with recursive loops."
 
@@ -351,7 +357,7 @@ class LoopAgentEngine:
             measurement_mode = "projected"
             delta = None
         else:
-            updated_score = clamp_score(measured_score)
+            updated_score = measured_score
             measurement_mode = "measured"
             delta = round(updated_score - previous_score, 2)
             self.state.current_score = updated_score
