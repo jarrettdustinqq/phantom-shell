@@ -118,6 +118,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
       - name: Upload evidence artifact bundle
+        id: artifact_upload
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.export.outputs.artifact_name }}
@@ -128,6 +129,7 @@ jobs:
             ${{ steps.export.outputs.sha_path }}
 
       - name: Download uploaded artifact for integrity check
+        id: artifact_download
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.export.outputs.artifact_name }}
@@ -293,3 +295,24 @@ jobs:
               return;
             }
             core.info("Validated marker comment SHA evidence lines.");
+
+      - name: Publish export stage receipt
+        if: ${{ always() }}
+        env:
+          GENERATION_OUTCOME: ${{ steps.export.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.artifact_upload.outcome }}
+          RETRIEVAL_OUTCOME: ${{ steps.artifact_download.outcome }}
+          INTEGRITY_OUTCOME: ${{ steps.integrity.outcome }}
+          TAMPER_TEST: ${{ inputs.tamper_test || 'false' }}
+        run: |
+          set -euo pipefail
+          receipt="generation=${GENERATION_OUTCOME:-not_run} upload=${UPLOAD_OUTCOME:-not_run} retrieval=${RETRIEVAL_OUTCOME:-not_run} integrity=${INTEGRITY_OUTCOME:-not_run} tamper_test=${TAMPER_TEST:-false}"
+          echo "::notice::EXPORT_STAGE_RECEIPT ${receipt}"
+          {
+            echo "### Export Stage Receipt"
+            echo "- Generation: ${GENERATION_OUTCOME:-not_run}"
+            echo "- Upload: ${UPLOAD_OUTCOME:-not_run}"
+            echo "- Retrieval: ${RETRIEVAL_OUTCOME:-not_run}"
+            echo "- Integrity: ${INTEGRITY_OUTCOME:-not_run}"
+            echo "- Tamper test enabled: ${TAMPER_TEST:-false}"
+          } >> "${GITHUB_STEP_SUMMARY}"
