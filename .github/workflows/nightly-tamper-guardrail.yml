@@ -24,6 +24,12 @@ jobs:
       FALLBACK_PR_NUMBER: "11"
       ISSUE_MARKER: "<!-- tamper-guardrail-regression -->"
     steps:
+      - name: Checkout guardrail source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - name: Resolve PR number
         id: resolve_pr
         env:
@@ -59,7 +65,7 @@ jobs:
         id: dispatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+          TARGET_BRANCH: ${{ github.ref_name }}
           PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
         run: |
           set -euo pipefail
@@ -141,50 +147,67 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EXPORT_RUN_ID: ${{ steps.dispatch.outputs.export_run_id }}
+          EXPORT_CONCLUSION: ${{ steps.wait_export.outputs.export_conclusion }}
         run: |
           set -euo pipefail
 
           log_path="${RUNNER_TEMP}/export-pr-evidence-${EXPORT_RUN_ID}.log"
+          log_fetch_succeeded=true
           if ! gh run view "${EXPORT_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --log > "${log_path}"; then
             echo "::warning::Could not fetch logs for run ${EXPORT_RUN_ID}."
             : > "${log_path}"
+            log_fetch_succeeded=false
           fi
 
-          mismatch_found="false"
-          # GitHub echoes shell source into logs before execution. Accept only a
-          # timestamped runtime error annotation, never a marker in that source.
-          if grep -Eq '(^|[[:space:]])[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z[[:space:]]+##\[error\]Integrity mismatch for .+: expected [0-9a-fA-F]{64}, got [0-9a-fA-F]{64}$' "${log_path}"; then
-            mismatch_found="true"
-          fi
-
-          echo "mismatch_found=${mismatch_found}" >> "${GITHUB_OUTPUT}"
-          echo "Mismatch evidence in logs: ${mismatch_found}"
+          python3 scripts/classify_tamper_guardrail.py \
+            --log-file "${log_path}" \
+            --export-conclusion "${EXPORT_CONCLUSION:-unknown}" \
+            --log-fetch-succeeded "${log_fetch_succeeded}" \
+            --github-output "${GITHUB_OUTPUT}"
 
       - name: Evaluate tamper guardrail assertion
         id: assert_guardrail
         env:
-          EXPORT_CONCLUSION: ${{ steps.wait_export.outputs.export_conclusion }}
-          MISMATCH_FOUND: ${{ steps.inspect_logs.outputs.mismatch_found }}
+          CLASSIFICATION: ${{ steps.inspect_logs.outputs.classification }}
+          FAILURE_STAGE: ${{ steps.inspect_logs.outputs.failure_stage }}
+          GUARDRAIL_PASS: ${{ steps.inspect_logs.outputs.guardrail_pass }}
+          OPEN_REGRESSION_ISSUE: ${{ steps.inspect_logs.outputs.open_regression_issue }}
         run: |
           set -euo pipefail
 
           observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           assertion_failed="true"
-          if [ "${EXPORT_CONCLUSION}" = "failure" ] && [ "${MISMATCH_FOUND}" = "true" ]; then
+          if [ "${GUARDRAIL_PASS:-false}" = "true" ]; then
             assertion_failed="false"
           fi
 
           echo "observed_at=${observed_at}" >> "${GITHUB_OUTPUT}"
+          echo "classification=${CLASSIFICATION:-unknown}" >> "${GITHUB_OUTPUT}"
+          echo "failure_stage=${FAILURE_STAGE:-unknown}" >> "${GITHUB_OUTPUT}"
+          echo "open_regression_issue=${OPEN_REGRESSION_ISSUE:-false}" >> "${GITHUB_OUTPUT}"
           echo "assertion_failed=${assertion_failed}" >> "${GITHUB_OUTPUT}"
 
           if [ "${assertion_failed}" = "false" ]; then
-            echo "Tamper guardrail passed: expected failure + mismatch evidence observed."
+            echo "Tamper guardrail passed: controlled mutation reached integrity verification and produced a runtime checksum mismatch."
           else
-            echo "::error::Tamper guardrail regression: expected conclusion=failure and mismatch evidence in logs."
+            case "${CLASSIFICATION:-unknown}" in
+              artifact_retrieval_failed)
+                echo "::error::Artifact retrieval failed before integrity verification. No cryptographic conclusion is available; no tamper-regression issue will be opened."
+                ;;
+              missing_artifact_files)
+                echo "::error::Required integrity files were missing. Verification did not establish tampering; no tamper-regression issue will be opened."
+                ;;
+              tamper_not_detected)
+                echo "::error::Controlled tamper input reached integrity verification, but the verifier completed successfully without a checksum mismatch."
+                ;;
+              *)
+                echo "::error::Guardrail failed closed at stage ${FAILURE_STAGE:-unknown}: ${CLASSIFICATION:-unknown}. No cryptographic regression is asserted without positive evidence."
+                ;;
+            esac
           fi
 
       - name: Open or update high-priority regression issue
-        if: ${{ steps.assert_guardrail.outputs.assertion_failed == 'true' }}
+        if: ${{ steps.assert_guardrail.outputs.open_regression_issue == 'true' }}
         id: upsert_issue
         uses: actions/github-script@v7
         env:
@@ -193,6 +216,7 @@ jobs:
           EXPORT_RUN_URL: ${{ steps.dispatch.outputs.export_run_url }}
           EXPORT_RUN_CONCLUSION: ${{ steps.wait_export.outputs.export_conclusion }}
           MISMATCH_FOUND: ${{ steps.inspect_logs.outputs.mismatch_found }}
+          FAILURE_CLASSIFICATION: ${{ steps.inspect_logs.outputs.classification }}
           GUARDRAIL_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GUARDRAIL_RUN_ID: ${{ github.run_id }}
           PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
@@ -206,6 +230,7 @@ jobs:
             const exportRunUrl = process.env.EXPORT_RUN_URL;
             const exportRunConclusion = process.env.EXPORT_RUN_CONCLUSION || "unknown";
             const mismatchFound = process.env.MISMATCH_FOUND;
+            const failureClassification = process.env.FAILURE_CLASSIFICATION || "unknown";
             const guardrailRunUrl = process.env.GUARDRAIL_RUN_URL;
             const guardrailRunId = process.env.GUARDRAIL_RUN_ID;
             const prNumber = process.env.PR_NUMBER;
@@ -217,8 +242,9 @@ jobs:
               "",
               "Priority: High",
               "",
-              "The nightly tamper guardrail detected unexpected behavior. This issue is auto-upserted.",
+              "The controlled tamper test reached integrity verification, but the verifier completed successfully despite the injected mutation. This issue is reserved for a verified tamper-not-detected result.",
               "",
+              `- Classification: ${failureClassification}`,
               `- Observed at (UTC): ${observedAt}`,
               `- Guardrail run: ${guardrailRunUrl}`,
               `- Guardrail run id: ${guardrailRunId}`,
@@ -316,16 +342,27 @@ jobs:
             echo "- PR number: #${{ steps.resolve_pr.outputs.pr_number }} (${{ steps.resolve_pr.outputs.source }})"
             echo "- Export run: ${{ steps.dispatch.outputs.export_run_url }}"
             echo "- Export conclusion: ${{ steps.wait_export.outputs.export_conclusion }}"
-            echo "- Log contains 'Integrity mismatch for': ${{ steps.inspect_logs.outputs.mismatch_found }}"
+            echo "- Classification: ${{ steps.assert_guardrail.outputs.classification }}"
+            echo "- Failure stage: ${{ steps.assert_guardrail.outputs.failure_stage }}"
+            echo "- Runtime mismatch evidence: ${{ steps.inspect_logs.outputs.mismatch_found }}"
+            echo "- Stage receipt found: ${{ steps.inspect_logs.outputs.receipt_found }}"
+            echo "- Guardrail passed: ${{ steps.inspect_logs.outputs.guardrail_pass }}"
+            echo "- Regression issue eligible: ${{ steps.assert_guardrail.outputs.open_regression_issue }}"
             echo "- Assertion failed: ${{ steps.assert_guardrail.outputs.assertion_failed }}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Fail on guardrail regression
+      - name: Fail on guardrail failure
         if: ${{ steps.assert_guardrail.outputs.assertion_failed == 'true' }}
+        env:
+          CLASSIFICATION: ${{ steps.assert_guardrail.outputs.classification }}
+          FAILURE_STAGE: ${{ steps.assert_guardrail.outputs.failure_stage }}
+          ISSUE_NUMBER: ${{ steps.upsert_issue.outputs.issue_number }}
+          ISSUE_ACTION: ${{ steps.upsert_issue.outputs.issue_action }}
         run: |
           set -euo pipefail
-
-          issue_number="${{ steps.upsert_issue.outputs.issue_number }}"
-          issue_action="${{ steps.upsert_issue.outputs.issue_action }}"
-          echo "::error::Tamper guardrail regression detected. Issue #${issue_number} ${issue_action}."
+          if [ -n "${ISSUE_NUMBER:-}" ]; then
+            echo "::error::Verified tamper-not-detected regression. Issue #${ISSUE_NUMBER} ${ISSUE_ACTION:-updated}."
+          else
+            echo "::error::Guardrail failed closed: ${CLASSIFICATION:-unknown} at stage ${FAILURE_STAGE:-unknown}. No cryptographic regression was established."
+          fi
           exit 1

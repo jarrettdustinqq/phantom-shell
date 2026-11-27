@@ -110,6 +110,7 @@ class TamperLogEvidenceTests(unittest.TestCase):
                 "RUNNER_TEMP": str(root),
                 "GITHUB_REPOSITORY": "example/repo",
                 "EXPORT_RUN_ID": "123",
+                "EXPORT_CONCLUSION": "failure",
                 "GITHUB_OUTPUT": str(output),
                 "TEST_LOG": str(root / "fixture.log"),
                 "TEST_GH_EXIT": "0" if available else "1",
